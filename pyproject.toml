@@ -7,7 +7,12 @@ authors = [
     { name = "loic-xu", email = "loic.xu@icloud.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.4",
+    "requests>=2.34.2",
+]
 
 [project.scripts]
 rail-track = "rail_track:main"
