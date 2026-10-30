@@ -64,16 +64,3 @@ class PrimApiClient:
         with open(target_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         return target_file
-
-
-if __name__ == "__main__":
-    line = "STIF:Line::C01742:"
-    client = PrimApiClient()
-
-    print(f"1. Collecte en direct pour {line}...")
-    raw_payload = client.fetch_line_data(line)
-
-    print("2. Sauvegarde dans la couche Bronze...")
-    saved_file = client.save_to_bronze(raw_payload, line)
-
-    print(f" Succès ! Fichier persisté : {saved_file}")
