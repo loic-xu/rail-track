@@ -16,13 +16,14 @@ class PrimApiClient:
     BASE_URL = "https://prim.iledefrance-mobilites.fr/marketplace"
 
     def __init__(self, api_key: str | None = None, timeout: float = 10.0) -> None:
-        self.api_key = api_key or os.getenv("PRIM_API_KEY")
+        key = api_key or os.getenv("PRIM_API_KEY")
 
-        if not self.api_key:
+        if not key:
             raise ValueError(
                 "PRIM API key is required."
                 "Set PRIM_API_KEY in .env or pass it explicitly."
             )
+        self.api_key: str = key
         self.timeout = timeout
 
     def fetch_line_data(self, line_ref: str = "STIF:Line::C01742:") -> dict[str, Any]:

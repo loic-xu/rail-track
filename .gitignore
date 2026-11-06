@@ -12,3 +12,4 @@ data/
 
 .env
 data_exploration.py
+docs/DESIGN_DOC.md
