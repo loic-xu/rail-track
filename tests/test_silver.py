@@ -6,9 +6,11 @@ preventing silent schema drift between the two code paths.
 """
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import polars as pl
 import pytest
 
 from rail_track.ingestion.models import TrainJourney
@@ -265,3 +267,104 @@ def test_multi_snapshot_partitioning(tmp_path: Path) -> None:
         .to_list()
     )
     assert snap1_seqs == [1, 2, 1, 2]
+
+
+def test_compute_delays_nominal_and_boundaries() -> None:
+    """Validate arrival/departure delay deltas and is_late_5min flag."""
+    transformer = SilverTransformer()
+    test_df = pl.DataFrame(
+        {
+            "journey_id": ["J1", "J1", "J2"],
+            "stop_sequence": [1, 2, 1],
+            "aimed_arrival_time": [
+                None,
+                datetime(2026, 10, 12, 10, 10, tzinfo=timezone.utc),
+                datetime(2026, 10, 12, 11, 0, tzinfo=timezone.utc),
+            ],
+            "expected_arrival_time": [
+                None,
+                datetime(2026, 10, 12, 10, 16, tzinfo=timezone.utc),  # +6 min
+                datetime(2026, 10, 12, 11, 2, tzinfo=timezone.utc),  # +2 min
+            ],
+            "aimed_departure_time": [
+                datetime(2026, 10, 12, 10, 0, tzinfo=timezone.utc),
+                None,  # Terminus
+                datetime(2026, 10, 12, 11, 5, tzinfo=timezone.utc),
+            ],
+            "expected_departure_time": [
+                datetime(
+                    2026, 10, 12, 9, 59, 30, tzinfo=timezone.utc
+                ),  # -0.5 min early
+                None,
+                datetime(2026, 10, 12, 11, 10, 30, tzinfo=timezone.utc),  # +5.5 min
+            ],
+        }
+    )
+
+    enriched = transformer.compute_delays(test_df)
+
+    # Row 1 (Origin): arrival delay null, departure delay -0.5 min, not late 5min
+    assert enriched["arrival_delay_min"][0] is None
+    assert enriched["departure_delay_min"][0] == -0.5
+    assert enriched["is_late_5min"][0] is False
+
+    # Row 2 (Terminus): arrival delay +6.0 min, departure delay null, late 5min
+    assert enriched["arrival_delay_min"][1] == 6.0
+    assert enriched["departure_delay_min"][1] is None
+    assert enriched["is_late_5min"][1] is True
+
+    # Row 3 (Intermediate): arrival +2.0 min, departure +5.5 min -> late 5min True
+    assert enriched["arrival_delay_min"][2] == 2.0
+    assert enriched["departure_delay_min"][2] == 5.5
+    assert enriched["is_late_5min"][2] is True
+
+
+def test_save_to_silver_and_transform_pipeline(tmp_path: Path) -> None:
+    """Validate Parquet partitioning, write integrity, and roundtrip reading."""
+    transformer = SilverTransformer()
+
+    test_df = pl.DataFrame(
+        {
+            "recorded_at": [
+                datetime(2026, 10, 12, 14, 0, tzinfo=timezone.utc),
+                datetime(2026, 11, 5, 8, 30, tzinfo=timezone.utc),
+            ],
+            "journey_id": ["TRAIN_A", "TRAIN_B"],
+            "stop_point_ref": ["SP:1", "SP:2"],
+            "arrival_delay_min": [0.0, 6.2],
+            "departure_delay_min": [1.5, 7.0],
+            "is_late_5min": [False, True],
+        }
+    )
+
+    silver_dir = tmp_path / "silver"
+    saved_files = transformer.save_to_silver(
+        test_df, base_dir=silver_dir, filename="test_run.parquet"
+    )
+
+    assert len(saved_files) == 2
+
+    # Check partition directories structure
+    oct_part = silver_dir / "year=2026" / "month=10" / "test_run.parquet"
+    nov_part = silver_dir / "year=2026" / "month=11" / "test_run.parquet"
+    assert oct_part.exists()
+    assert nov_part.exists()
+
+    # Read back and verify roundtrip
+    oct_df = pl.read_parquet(oct_part)
+    assert oct_df.height == 1
+    assert oct_df["journey_id"][0] == "TRAIN_A"
+    assert oct_df["is_late_5min"][0] is False
+
+    nov_df = pl.read_parquet(nov_part)
+    assert nov_df.height == 1
+    assert nov_df["journey_id"][0] == "TRAIN_B"
+    assert nov_df["is_late_5min"][0] is True
+
+
+def test_save_to_silver_empty_dataframe(tmp_path: Path) -> None:
+    """Empty dataframe must return an empty list without writing files."""
+    transformer = SilverTransformer()
+    empty_df = pl.DataFrame()
+    saved = transformer.save_to_silver(empty_df, base_dir=tmp_path / "silver")
+    assert saved == []

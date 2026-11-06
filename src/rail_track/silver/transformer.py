@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -207,3 +208,138 @@ class SilverTransformer:
             f"Extraction completed successfully: {df.height} stop calls ingested."
         )
         return df
+
+    def compute_delays(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Compute atomic delay deltas in minutes and contractual flags.
+
+        Calculates arrival and departure delays against aimed schedules,
+        handling origin and terminus boundaries gracefully (preserving nulls),
+        and adds the official IDFM ``is_late_5min`` boolean flag.
+
+        Args:
+            df: Polars DataFrame output from ``extract_raw_calls()``.
+
+        Returns:
+            Polars DataFrame enriched with ``arrival_delay_min``,
+            ``departure_delay_min``, and ``is_late_5min``.
+        """
+        logger.info(f"Computing delay deltas for {df.height} stop calls.")
+
+        return df.with_columns(
+            [
+                (
+                    (
+                        pl.col("expected_arrival_time") - pl.col("aimed_arrival_time")
+                    ).dt.total_seconds()
+                    / 60.0
+                )
+                .round(2)
+                .alias("arrival_delay_min"),
+                (
+                    (
+                        pl.col("expected_departure_time")
+                        - pl.col("aimed_departure_time")
+                    ).dt.total_seconds()
+                    / 60.0
+                )
+                .round(2)
+                .alias("departure_delay_min"),
+            ]
+        ).with_columns(
+            [
+                (
+                    (pl.col("arrival_delay_min") >= 5.0)
+                    | (pl.col("departure_delay_min") >= 5.0)
+                )
+                .fill_null(False)
+                .alias("is_late_5min")
+            ]
+        )
+
+    def save_to_silver(
+        self,
+        df: pl.DataFrame,
+        base_dir: Path | str = "data/silver",
+        filename: str | None = None,
+    ) -> list[Path]:
+        """Save cleaned Silver data as partitioned Parquet files.
+
+        Partitions the DataFrame by date into ``year=YYYY/month=MM/`` directories
+        using ZSTD compression for optimal query performance and compact storage.
+
+        Args:
+            df: Enriched Polars DataFrame from ``compute_delays()``.
+            base_dir: Root directory for the Silver storage layer.
+            filename: Optional custom filename for the Parquet file. Defaults to
+                ``train_stops_{timestamp}.parquet``.
+
+        Returns:
+            List of Path objects pointing to the newly written Parquet files.
+        """
+        if df.is_empty():
+            logger.warning(
+                "Empty DataFrame provided to save_to_silver; skipping write."
+            )
+            return []
+
+        base_path = Path(base_dir)
+        now = datetime.now(timezone.utc)
+        file_stem = filename or f"train_stops_{now:%Y%m%d_%H%M%S}.parquet"
+
+        df_partitioned = df.with_columns(
+            [
+                pl.coalesce(
+                    [
+                        pl.col("recorded_at").dt.year(),
+                        pl.lit(now.year),
+                    ]
+                ).alias("_part_year"),
+                pl.coalesce(
+                    [
+                        pl.col("recorded_at").dt.strftime("%m"),
+                        pl.lit(f"{now.month:02d}"),
+                    ]
+                ).alias("_part_month"),
+            ]
+        )
+
+        saved_files: list[Path] = []
+        for (year, month), partition_df in df_partitioned.group_by(
+            ["_part_year", "_part_month"]
+        ):
+            target_dir = base_path / f"year={year}" / f"month={month}"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = target_dir / file_stem
+
+            cleaned_partition = partition_df.drop(["_part_year", "_part_month"])
+            cleaned_partition.write_parquet(
+                target_path,
+                compression="zstd",
+            )
+            logger.info(
+                f"Saved {cleaned_partition.height} rows to Silver Parquet: "
+                f"{target_path}"
+            )
+            saved_files.append(target_path)
+
+        return saved_files
+
+    def transform(
+        self,
+        bronze_path_pattern: str | Path,
+        silver_dir: Path | str = "data/silver",
+        filename: str | None = None,
+    ) -> list[Path]:
+        """Execute end-to-end Silver pipeline: extract, enrich, and persist.
+
+        Args:
+            bronze_path_pattern: Glob pattern or path to raw Bronze files.
+            silver_dir: Output base directory for Silver Parquet files.
+            filename: Optional custom filename for the Parquet file.
+
+        Returns:
+            List of generated Parquet file paths.
+        """
+        raw_df = self.extract_raw_calls(bronze_path_pattern)
+        enriched_df = self.compute_delays(raw_df)
+        return self.save_to_silver(enriched_df, base_dir=silver_dir, filename=filename)
