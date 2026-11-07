@@ -1,0 +1,17 @@
+rail_track:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: >-
+        {%- if env_var('DBT_DUCKDB_PATH', '') -%}
+          {{ env_var('DBT_DUCKDB_PATH') }}
+        {%- elif env_var('PWD', '').endswith('/dbt') -%}
+          ../data/gold/rail_track.duckdb
+        {%- else -%}
+          data/gold/rail_track.duckdb
+        {%- endif -%}
+      schema: main
+      threads: 4
+      extensions:
+        - parquet

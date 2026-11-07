@@ -190,6 +190,7 @@ class SilverTransformer:
         SELECT
             *,
             ROW_NUMBER() OVER (
+                -- Isolate stop sequence (1..N) per train journey and temporal snapshot
                 PARTITION BY journey_id, recorded_at
                 ORDER BY COALESCE(
                     aimed_departure_time,

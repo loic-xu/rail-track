@@ -10,6 +10,15 @@ wheels/
 .venv
 data/
 
+# Environment and scratch
 .env
 data_exploration.py
 docs/DESIGN_DOC.md
+
+# dbt artifacts
+**/target/
+**/dbt_packages/
+**/logs/
+**/.user.yml
+*.duckdb
+*.duckdb.wal
