@@ -1,0 +1,110 @@
+version: 2
+
+models:
+  - name: stg_train_stops
+    description: "Staging view over raw Silver Parquet files with deduplication and surrogate keys."
+    columns:
+      - name: punctuality_key
+        description: "Surrogate Primary Key of the train stop observation."
+        tests:
+          - unique
+          - not_null
+      - name: date_key
+        description: "Integer date key YYYYMMDD for calendar dimension join."
+        tests:
+          - not_null
+      - name: stop_point_ref
+        description: "Technical STIF StopArea identifier."
+        tests:
+          - not_null
+      - name: journey_id
+        description: "Technical VehicleJourney identifier."
+        tests:
+          - not_null
+
+  - name: dim_station
+    description: "Dimension table representing train stations enriched with IDFM referential data."
+    columns:
+      - name: station_key
+        description: "MD5 Surrogate Key for the station."
+        tests:
+          - unique
+          - not_null
+      - name: stop_point_ref
+        description: "Natural technical identifier."
+        tests:
+          - unique
+          - not_null
+      - name: station_name
+        description: "Official public station name."
+        tests:
+          - not_null
+
+  - name: dim_train
+    description: "Dimension table representing unique train journeys and mission attributes."
+    columns:
+      - name: train_key
+        description: "MD5 Surrogate Key for the train journey."
+        tests:
+          - unique
+          - not_null
+      - name: journey_id
+        description: "Natural technical VehicleJourneyRef."
+        tests:
+          - unique
+          - not_null
+      - name: line_name
+        description: "Public commercial line name (e.g. A, B)."
+        tests:
+          - not_null
+
+  - name: dim_date
+    description: "Calendar dimension table for time intelligence and analytics."
+    columns:
+      - name: date_key
+        description: "Integer date key YYYYMMDD."
+        tests:
+          - unique
+          - not_null
+      - name: full_date
+        description: "Date value."
+        tests:
+          - unique
+          - not_null
+
+  - name: fact_train_punctuality
+    description: "Central fact table storing atomic train stop observations and delay metrics."
+    columns:
+      - name: punctuality_key
+        description: "Surrogate Primary Key."
+        tests:
+          - unique
+          - not_null
+      - name: station_key
+        description: "Foreign Key to dim_station."
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_station')
+                field: station_key
+      - name: train_key
+        description: "Foreign Key to dim_train."
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_train')
+                field: train_key
+      - name: date_key
+        description: "Foreign Key to dim_date."
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: is_late_5min
+        description: "Official IDFM contractual punctuality flag (delay >= 5 min)."
+        tests:
+          - not_null

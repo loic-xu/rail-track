@@ -22,3 +22,4 @@ docs/DESIGN_DOC.md
 **/.user.yml
 *.duckdb
 *.duckdb.wal
+docs/interview-prep.md

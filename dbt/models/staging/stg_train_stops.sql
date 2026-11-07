@@ -20,7 +20,7 @@ SELECT
     md5(concat_ws('||', journey_id, CAST(stop_sequence AS VARCHAR))) AS punctuality_key,
 
     -- Date Key for dimensional joins (YYYYMMDD integer)
-    CAST(strftime(COALESCE(aimed_departure_time, aimed_arrival_time, recorded_at), '%Y%m%d') AS INTEGER) AS date_key,
+    CAST(strftime(COALESCE(aimed_departure_time, aimed_arrival_time), '%Y%m%d') AS INTEGER) AS date_key,
 
     -- Train & Journey Identifiers
     journey_id,
