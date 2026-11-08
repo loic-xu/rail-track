@@ -46,4 +46,8 @@ jobs:
         run: uv run pytest --verbose
 
       - name: Validate dbt Models Compilation
-        run: uv run dbt compile --profiles-dir dbt --project-dir dbt
+        env:
+          DBT_DUCKDB_PATH: ":memory:"
+        run: |
+          mkdir -p data/gold
+          uv run dbt compile --profiles-dir dbt --project-dir dbt
