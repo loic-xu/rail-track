@@ -14,7 +14,9 @@ class SilverTransformer:
         self.conn = duckdb_conn if duckdb_conn else duckdb.connect(":memory:")
         self.conn.execute("SET TimeZone = 'UTC';")
 
-    def extract_raw_calls(self, bronze_path_pattern: str | Path) -> pl.DataFrame:
+    def extract_raw_calls(
+        self, bronze_path_pattern: str | Path | list[str] | list[Path]
+    ) -> pl.DataFrame:
         """Extract and unnest nested SIRI JSON into a tabular schema.
 
         Leverages DuckDB's streaming JSON engine to flatten nested
@@ -23,21 +25,25 @@ class SilverTransformer:
         ``stop_sequence`` representing the sequential stop order of each train.
 
         Args:
-            bronze_path_pattern: Filepath or glob pattern pointing
-                to raw Bronze JSON dumps.
+            bronze_path_pattern: Filepath, glob pattern, or list of file paths
+                pointing to raw Bronze JSON dumps.
 
         Returns:
             A Polars DataFrame where each row corresponds to an
             individual train stop call with calculated stop sequence.
         """
-        path_str = str(bronze_path_pattern)
-        logger.info(f"Starting raw call extraction from Bronze pattern: {path_str}")
+        if isinstance(bronze_path_pattern, (list, tuple)):
+            path_literal = "[" + ", ".join(f"'{p}'" for p in bronze_path_pattern) + "]"
+        else:
+            path_literal = f"'{bronze_path_pattern}'"
+
+        logger.info(f"Starting raw call extraction from Bronze source: {path_literal}")
 
         query = f"""
         WITH raw_json AS (
             SELECT *
             FROM read_json_auto(
-                '{path_str}',
+                {path_literal},
                 records := true,
                 ignore_errors := true
             )
@@ -327,14 +333,14 @@ class SilverTransformer:
 
     def transform(
         self,
-        bronze_path_pattern: str | Path,
+        bronze_path_pattern: str | Path | list[str] | list[Path],
         silver_dir: Path | str = "data/silver",
         filename: str | None = None,
     ) -> list[Path]:
         """Execute end-to-end Silver pipeline: extract, enrich, and persist.
 
         Args:
-            bronze_path_pattern: Glob pattern or path to raw Bronze files.
+            bronze_path_pattern: Glob pattern, path, or list of paths to Bronze files.
             silver_dir: Output base directory for Silver Parquet files.
             filename: Optional custom filename for the Parquet file.
 

@@ -368,3 +368,30 @@ def test_save_to_silver_empty_dataframe(tmp_path: Path) -> None:
     empty_df = pl.DataFrame()
     saved = transformer.save_to_silver(empty_df, base_dir=tmp_path / "silver")
     assert saved == []
+
+
+def test_extract_raw_calls_with_file_list(
+    tmp_path: Path, raw_journey: dict[str, Any]
+) -> None:
+    """Extracting from a list of Path / str objects must succeed and combine rows."""
+    file1 = tmp_path / "f1.json"
+    file2 = tmp_path / "f2.json"
+
+    j1 = raw_journey.copy()
+    j1["DatedVehicleJourneyRef"] = {"value": "TRAIN_01"}
+    file1.write_text(json.dumps(_wrap_siri_envelope([j1])), encoding="utf-8")
+
+    j2 = raw_journey.copy()
+    j2["DatedVehicleJourneyRef"] = {"value": "TRAIN_02"}
+    file2.write_text(json.dumps(_wrap_siri_envelope([j2])), encoding="utf-8")
+
+    transformer = SilverTransformer()
+    # Test with list of Path
+    df = transformer.extract_raw_calls([file1, file2])
+    assert df.height == 2
+    assert set(df["journey_id"].to_list()) == {"TRAIN_01", "TRAIN_02"}
+
+    # Test with list of str
+    df_str = transformer.extract_raw_calls([str(file1), str(file2)])
+    assert df_str.height == 2
+    assert set(df_str["journey_id"].to_list()) == {"TRAIN_01", "TRAIN_02"}
