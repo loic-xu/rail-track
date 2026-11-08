@@ -350,3 +350,76 @@ class SilverTransformer:
         raw_df = self.extract_raw_calls(bronze_path_pattern)
         enriched_df = self.compute_delays(raw_df)
         return self.save_to_silver(enriched_df, base_dir=silver_dir, filename=filename)
+
+    def compact_month(
+        self,
+        silver_dir: Path | str,
+        year: int,
+        month: int,
+        target_filename: str | None = None,
+    ) -> Path | None:
+        """Compact Silver delta Parquet files of a given month into one file.
+
+        Consolidates hundreds or thousands of 15-minute micro-batch Parquet
+        files into an atomic, ZSTD-compressed, consolidated monthly file.
+        Mitigates the Small Files Problem without continuous write amplification.
+
+        Args:
+            silver_dir: Base directory for the Silver layer (e.g. ``data/silver``).
+            year: Target partition year (e.g. 2026).
+            month: Target partition month (e.g. 11).
+            target_filename: Optional custom filename. Defaults to
+                ``train_stops_{year}{month:02d}.parquet``.
+
+        Returns:
+            Path to the newly compacted Parquet file, or existing path if already
+            compacted, or None if the partition directory is missing or empty.
+        """
+        partition_dir = Path(silver_dir) / f"year={year}" / f"month={month:02d}"
+        if not partition_dir.exists():
+            logger.warning(f"Partition directory does not exist: {partition_dir}")
+            return None
+
+        parquet_files = sorted(partition_dir.glob("*.parquet"))
+        if not parquet_files:
+            logger.warning(f"No Parquet files found in {partition_dir} to compact.")
+            return None
+
+        final_name = target_filename or f"train_stops_{year}{month:02d}.parquet"
+        final_path = partition_dir / final_name
+
+        if len(parquet_files) == 1 and parquet_files[0] == final_path:
+            logger.info(f"Partition {partition_dir} is already compacted: {final_path}")
+            return final_path
+
+        logger.info(
+            f"Compacting {len(parquet_files)} Parquet files in "
+            f"{partition_dir} into {final_path}"
+        )
+
+        tmp_path = partition_dir / f"{final_name}.tmp"
+        file_literals = (
+            "[" + ", ".join(f"'{p.as_posix()}'" for p in parquet_files) + "]"
+        )
+
+        compact_query = f"""
+        COPY (
+            SELECT *
+            FROM read_parquet({file_literals})
+        ) TO '{tmp_path.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD);
+        """
+        self.conn.execute(compact_query)
+        tmp_path.replace(final_path)
+
+        removed_count = 0
+        for f in parquet_files:
+            if f != final_path and f.exists():
+                f.unlink()
+                removed_count += 1
+
+        logger.info(
+            f"Compaction completed: consolidated {len(parquet_files)} files "
+            f"into {final_path} ({final_path.stat().st_size} bytes). "
+            f"Removed {removed_count} obsolete delta files."
+        )
+        return final_path

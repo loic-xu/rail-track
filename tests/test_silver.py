@@ -395,3 +395,62 @@ def test_extract_raw_calls_with_file_list(
     df_str = transformer.extract_raw_calls([str(file1), str(file2)])
     assert df_str.height == 2
     assert set(df_str["journey_id"].to_list()) == {"TRAIN_01", "TRAIN_02"}
+
+
+def test_compact_month_consolidates_files(tmp_path: Path) -> None:
+    """Monthly compaction must consolidate multiple Parquet deltas into one file."""
+    transformer = SilverTransformer()
+    part_dir = tmp_path / "silver" / "year=2026" / "month=11"
+    part_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create 3 small mock delta Parquet files
+    for i in range(1, 4):
+        df = pl.DataFrame(
+            {
+                "journey_id": [f"TRAIN_{i}"],
+                "stop_point_ref": [f"SP_{i}"],
+                "arrival_delay_min": [float(i)],
+                "departure_delay_min": [float(i)],
+                "is_late_5min": [i >= 5],
+            }
+        )
+        df.write_parquet(part_dir / f"train_stops_20261108_10{i}000.parquet")
+
+    assert len(list(part_dir.glob("*.parquet"))) == 3
+
+    # Execute monthly compaction
+    compacted = transformer.compact_month(tmp_path / "silver", year=2026, month=11)
+
+    assert compacted is not None
+    assert compacted.exists()
+    assert compacted.name == "train_stops_202611.parquet"
+
+    # Only the compacted file should remain
+    remaining_files = list(part_dir.glob("*.parquet"))
+    assert len(remaining_files) == 1
+    assert remaining_files[0] == compacted
+
+    # Verify all 3 rows were preserved
+    compacted_df = pl.read_parquet(compacted)
+    assert compacted_df.height == 3
+    assert set(compacted_df["journey_id"].to_list()) == {
+        "TRAIN_1",
+        "TRAIN_2",
+        "TRAIN_3",
+    }
+
+    # Running again on already compacted partition returns the same path (idempotent)
+    recompacted = transformer.compact_month(tmp_path / "silver", year=2026, month=11)
+    assert recompacted == compacted
+
+
+def test_compact_month_missing_or_empty_partition(tmp_path: Path) -> None:
+    """Non-existent or empty partition returns None without errors."""
+    transformer = SilverTransformer()
+    # Non-existent directory
+    assert transformer.compact_month(tmp_path / "silver", year=2026, month=12) is None
+
+    # Empty directory
+    empty_dir = tmp_path / "silver" / "year=2026" / "month=01"
+    empty_dir.mkdir(parents=True, exist_ok=True)
+    assert transformer.compact_month(tmp_path / "silver", year=2026, month=1) is None
