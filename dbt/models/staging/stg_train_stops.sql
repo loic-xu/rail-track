@@ -5,22 +5,38 @@ WITH raw_silver AS (
     FROM read_parquet({{ get_silver_path() }})
 ),
 
-deduplicated AS (
-    -- Retain the latest snapshot for each unique train journey and stop sequence
+deduplicated_stops AS (
+    -- 1. Deduplicate by physical station stop per train journey, retaining the latest snapshot state
     SELECT *
     FROM raw_silver
     QUALIFY ROW_NUMBER() OVER (
-        PARTITION BY journey_id, stop_sequence
+        PARTITION BY journey_id, stop_point_ref
         ORDER BY recorded_at DESC
     ) = 1
+),
+
+sequenced_stops AS (
+    -- 2. Reconstruct the complete global stop sequence across all observed calls of the journey
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY journey_id
+            ORDER BY COALESCE(
+                aimed_arrival_time,
+                aimed_departure_time,
+                expected_arrival_time,
+                expected_departure_time
+            )
+        ) AS rebuilt_stop_sequence
+    FROM deduplicated_stops
 )
 
 SELECT
-    -- Surrogate Primary Key
-    md5(concat_ws('||', journey_id, CAST(stop_sequence AS VARCHAR))) AS punctuality_key,
+    -- Surrogate Primary Key based on physical train journey and station stop
+    md5(concat_ws('||', journey_id, stop_point_ref)) AS punctuality_key,
 
     -- Date Key for dimensional joins (YYYYMMDD integer)
-    CAST(strftime(COALESCE(aimed_departure_time, aimed_arrival_time), '%Y%m%d') AS INTEGER) AS date_key,
+    CAST(strftime(COALESCE(aimed_departure_time, aimed_arrival_time, expected_departure_time, expected_arrival_time), '%Y%m%d') AS INTEGER) AS date_key,
 
     -- Train & Journey Identifiers
     journey_id,
@@ -36,7 +52,7 @@ SELECT
     -- Station & Stop Call Technical References
     stop_point_ref,
     platform,
-    stop_sequence,
+    rebuilt_stop_sequence AS stop_sequence,
 
     -- Timestamps (Strict UTC)
     aimed_arrival_time,
@@ -55,4 +71,4 @@ SELECT
     -- Audit Metadata
     recorded_at
 
-FROM deduplicated
+FROM sequenced_stops
