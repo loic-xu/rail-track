@@ -34,21 +34,32 @@ def fetch_stations_referential(
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    params: dict[str, Any] = {
-        "limit": 100,
-        "where": "res_com IN ('RER A', 'RER B')",
-    }
+    limit = 100
+    offset = 0
+    records: list[dict[str, Any]] = []
 
     print(f"Fetching station referential from IDFM Open Data: {API_URL}...")
-    try:
-        response = httpx.get(API_URL, params=params, timeout=timeout_s)
-        response.raise_for_status()
-        data = response.json()
-    except httpx.HTTPError as exc:
-        print(f"Error fetching IDFM Open Data: {exc}", file=sys.stderr)
-        raise
+    while True:
+        params: dict[str, Any] = {
+            "limit": limit,
+            "offset": offset,
+            "where": "res_com IN ('RER A', 'RER B')",
+        }
+        try:
+            response = httpx.get(API_URL, params=params, timeout=timeout_s)
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError as exc:
+            print(f"Error fetching IDFM Open Data: {exc}", file=sys.stderr)
+            raise
 
-    records = data.get("results", [])
+        batch = data.get("results", [])
+        records.extend(batch)
+        total_count = data.get("total_count", len(records))
+        if len(records) >= total_count or not batch:
+            break
+        offset += limit
+
     print(f"Retrieved {len(records)} raw records from IDFM API.")
 
     # Deduplicate by stop_point_ref while aggregating served lines
