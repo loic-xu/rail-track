@@ -35,8 +35,13 @@ SELECT
     -- Surrogate Primary Key based on physical train journey and station stop
     md5(concat_ws('||', journey_id, stop_point_ref)) AS punctuality_key,
 
-    -- Date Key for dimensional joins (YYYYMMDD integer)
-    CAST(strftime(COALESCE(aimed_departure_time, aimed_arrival_time, expected_departure_time, expected_arrival_time), '%Y%m%d') AS INTEGER) AS date_key,
+    -- Date Key for dimensional joins (YYYYMMDD integer based on local Paris time of journey start)
+    FIRST_VALUE(
+        CAST(strftime(timezone('Europe/Paris', COALESCE(aimed_departure_time, aimed_arrival_time, expected_departure_time, expected_arrival_time)), '%Y%m%d') AS INTEGER)
+    ) OVER (
+        PARTITION BY journey_id
+        ORDER BY rebuilt_stop_sequence
+    ) AS date_key,
 
     -- Train & Journey Identifiers
     journey_id,
