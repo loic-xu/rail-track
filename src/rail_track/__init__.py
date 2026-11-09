@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from rail-track!")
+"""RailTrack — Citizen Transit Punctuality Platform."""
