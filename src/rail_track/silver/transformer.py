@@ -1,18 +1,85 @@
+import glob
+import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import UnionType
+from typing import Any, Union, get_args, get_origin
 
 import duckdb
 import polars as pl
 
+from rail_track.ingestion.models import StopCall, TrainJourney
 from rail_track.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _pydantic_to_polars_type(py_type: Any) -> pl.DataType:
+    """Map a Python / Pydantic field annotation to its equivalent Polars DataType."""
+    origin = get_origin(py_type)
+    if origin in (Union, UnionType):
+        args = [a for a in get_args(py_type) if a is not type(None)]
+        if args:
+            py_type = args[0]
+    if py_type is str:
+        return pl.String()
+    if py_type is bool:
+        return pl.Boolean()
+    if py_type is int:
+        return pl.Int64()
+    if py_type is float:
+        return pl.Float64()
+    if py_type is datetime:
+        return pl.Datetime("us", "UTC")
+    return pl.String()
+
+
+def build_raw_calls_schema() -> dict[str, pl.DataType]:
+    """Dynamically derive the tabular Polars schema from Pydantic contract models.
+
+    Preserves the Pydantic Data Contract (Control Plane) as the Single
+    Source of Truth (SSOT), strictly preventing schema drift between
+    contract models and empty dataframe fallbacks in the Data Plane.
+    """
+    schema: dict[str, pl.DataType] = {"recorded_at": pl.Datetime("us", "UTC")}
+    for name, field in TrainJourney.model_fields.items():
+        if name != "calls":
+            schema[name] = _pydantic_to_polars_type(field.annotation)
+    for name, field in StopCall.model_fields.items():
+        schema[name] = _pydantic_to_polars_type(field.annotation)
+    schema["stop_sequence"] = pl.Int64()
+    return schema
+
+
+RAW_CALLS_SCHEMA: dict[str, pl.DataType] = build_raw_calls_schema()
 
 
 class SilverTransformer:
     def __init__(self, duckdb_conn: duckdb.DuckDBPyConnection | None = None) -> None:
         self.conn = duckdb_conn if duckdb_conn else duckdb.connect(":memory:")
         self.conn.execute("SET TimeZone = 'UTC';")
+
+    @staticmethod
+    def _file_has_journeys(file_path: str | Path) -> bool:
+        """Inspect a Bronze JSON file to check if it contains any vehicle journeys."""
+        path = Path(file_path)
+        if not path.is_file():
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            deliveries = (
+                data.get("Siri", {})
+                .get("ServiceDelivery", {})
+                .get("EstimatedTimetableDelivery", [])
+            )
+            return any(
+                bool(frame.get("EstimatedVehicleJourney"))
+                for d in deliveries
+                for frame in d.get("EstimatedJourneyVersionFrame", [])
+            )
+        except Exception:
+            return False
 
     def extract_raw_calls(
         self, bronze_path_pattern: str | Path | list[str] | list[Path]
@@ -33,9 +100,24 @@ class SilverTransformer:
             individual train stop call with calculated stop sequence.
         """
         if isinstance(bronze_path_pattern, (list, tuple)):
-            path_literal = "[" + ", ".join(f"'{p}'" for p in bronze_path_pattern) + "]"
+            candidate_files = [Path(p) for p in bronze_path_pattern]
+        elif "*" in str(bronze_path_pattern) or "?" in str(bronze_path_pattern):
+            candidate_files = [
+                Path(p) for p in glob.glob(str(bronze_path_pattern), recursive=True)
+            ]
         else:
-            path_literal = f"'{bronze_path_pattern}'"
+            candidate_files = [Path(bronze_path_pattern)]
+
+        # Filter out nocturnal off-peak files where no trains circulate
+        valid_files = [f for f in candidate_files if self._file_has_journeys(f)]
+        if not valid_files:
+            logger.info(
+                "No active train journeys found in Bronze files "
+                "(nocturnal service shutdown). Returning empty schema."
+            )
+            return pl.DataFrame(schema=RAW_CALLS_SCHEMA)
+
+        path_literal = "[" + ", ".join(f"'{p}'" for p in valid_files) + "]"
 
         logger.info(f"Starting raw call extraction from Bronze source: {path_literal}")
 

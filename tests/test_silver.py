@@ -454,3 +454,34 @@ def test_compact_month_missing_or_empty_partition(tmp_path: Path) -> None:
     empty_dir = tmp_path / "silver" / "year=2026" / "month=01"
     empty_dir.mkdir(parents=True, exist_ok=True)
     assert transformer.compact_month(tmp_path / "silver", year=2026, month=1) is None
+
+
+def test_nocturnal_empty_payload_graceful_handling(tmp_path: Path) -> None:
+    """Empty nocturnal SIRI payloads produce empty output without error."""
+    empty_payload = {
+        "Siri": {
+            "ServiceDelivery": {
+                "ResponseTimestamp": "2026-11-09T01:15:01.023Z",
+                "EstimatedTimetableDelivery": [
+                    {
+                        "ResponseTimestamp": "2026-11-09T01:15:01.030Z",
+                        "Version": "2.0",
+                        "Status": "true",
+                        "EstimatedJourneyVersionFrame": [{}],
+                    }
+                ],
+            }
+        }
+    }
+    sample_file = tmp_path / "night_siri.json"
+    sample_file.write_text(json.dumps(empty_payload), encoding="utf-8")
+
+    transformer = SilverTransformer()
+    # Extraction returns empty DataFrame with schema instead of DuckDB UNNEST crash
+    df = transformer.extract_raw_calls(sample_file)
+    assert df.is_empty()
+    assert "journey_id" in df.columns
+
+    # Full transform pipeline executes cleanly without raising exceptions
+    saved_files = transformer.transform(sample_file, silver_dir=tmp_path / "silver")
+    assert saved_files == []

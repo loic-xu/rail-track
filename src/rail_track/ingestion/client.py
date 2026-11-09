@@ -20,7 +20,7 @@ class PrimApiClient:
 
         if not key:
             raise ValueError(
-                "PRIM API key is required."
+                "PRIM API key is required. "
                 "Set PRIM_API_KEY in .env or pass it explicitly."
             )
         self.api_key: str = key
