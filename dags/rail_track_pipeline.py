@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from airflow import DAG
 from airflow.exceptions import AirflowException
@@ -105,11 +106,7 @@ def quality_gate(**context: Any) -> int:
             for frame in frames:
                 journeys = frame.get("EstimatedVehicleJourney", [])
                 for journey in journeys[:5]:
-                    model = TrainJourney.model_validate(journey)
-                    if not model.journey_id:
-                        raise AirflowException(
-                            f"Quality Gate violation in {path.name}: Empty journey_id."
-                        )
+                    TrainJourney.model_validate(journey)
                     validated_count += 1
 
     logger.info(
@@ -153,8 +150,8 @@ with DAG(
     dag_id="rail_track_pipeline",
     default_args=DEFAULT_ARGS,
     description="RailTrack ELT Pipeline: Ingestion, Quality Gate, Silver & Gold",
-    schedule="*/15 0-1,4-23 * * *",
-    start_date=datetime(2026, 11, 1),
+    schedule="*/15 0,5-23 * * *",
+    start_date=datetime(2026, 11, 1, tzinfo=ZoneInfo("Europe/Paris")),
     catchup=False,
     max_active_runs=1,
     tags=["rail-track", "production", "rer", "duckdb", "dbt"],

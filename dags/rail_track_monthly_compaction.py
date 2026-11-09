@@ -29,14 +29,21 @@ DEFAULT_ARGS = {
 
 def compact_previous_month(**context: Any) -> str:
     """Identify and compact all delta files from the recently concluded month."""
-    # Airflow provides logical_date in context
-    logical_date: datetime = context.get("logical_date") or datetime.now(timezone.utc)
+    interval_start = context.get("data_interval_start")
+    interval_end = context.get("data_interval_end")
 
-    # Determine previous month and year
-    first_of_month = logical_date.replace(day=1)
-    last_day_prev_month = first_of_month - timedelta(days=1)
-    target_year = last_day_prev_month.year
-    target_month = last_day_prev_month.month
+    # In Airflow scheduled runs with '0 3 1 * *', interval_start is the 1st
+    # of the concluded month
+    if interval_start and interval_end and interval_start != interval_end:
+        target_year = interval_start.year
+        target_month = interval_start.month
+    else:
+        # Fallback for manual triggers: target previous month relative to base date
+        base_date: datetime = context.get("logical_date") or datetime.now(timezone.utc)
+        first_of_month = base_date.replace(day=1)
+        last_day_prev_month = first_of_month - timedelta(days=1)
+        target_year = last_day_prev_month.year
+        target_month = last_day_prev_month.month
 
     logger.info(
         f"Triggering monthly compaction for year={target_year}/month={target_month:02d}"
