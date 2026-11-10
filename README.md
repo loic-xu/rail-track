@@ -1,4 +1,4 @@
-# 🚆 RailTrack — Real-Time Transit Lakehouse & Analytics Platform
+d# 🚆 RailTrack — Real-Time Transit Lakehouse & Analytics Platform
 
 [![CI](https://github.com/loic-xu/rail-track/actions/workflows/ci.yml/badge.svg)](https://github.com/loic-xu/rail-track/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
@@ -13,7 +13,7 @@
 > **An end-to-end data platform tracking and modeling real-time transit punctuality on Paris commuter rail (RER A & RER B — 2.5M daily passengers) using DuckDB, dbt, and Apache Airflow.**
 
 <p align="center">
-  <img src="docs/dashboard_preview.jpg" alt="RailTracker — The Citizen Transit Punctuality Dashboard" width="100%">
+  <img src="docs/dashboard_preview.png" alt="RailTracker — The Citizen Transit Punctuality Dashboard" width="100%">
 </p>
 
 ---
