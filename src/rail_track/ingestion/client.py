@@ -52,9 +52,13 @@ class PrimApiClient:
             return cast(dict[str, Any], response.json())
 
     def save_to_bronze(
-        self, data: dict[str, Any], line_ref: str, base_dir: Path | str = "data/bronze"
+        self,
+        data: dict[str, Any],
+        line_ref: str,
+        base_dir: Path | str = "data/bronze",
+        snapshot_time: datetime | None = None,
     ) -> Path:
-        now = datetime.now(timezone.utc)
+        now = snapshot_time or datetime.now(timezone.utc)
         partition_dir = Path(base_dir) / f"{now:%Y}" / f"{now:%m}" / f"{now:%d}"
         partition_dir.mkdir(parents=True, exist_ok=True)
 

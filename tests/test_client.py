@@ -113,3 +113,34 @@ def test_save_to_bronze_structure_and_persistence(tmp_path: Path) -> None:
     with open(saved_file_path, encoding="utf-8") as f:
         loaded_content = json.load(f)
     assert loaded_content == sample_payload
+
+
+def test_save_to_bronze_deterministic_snapshot_time(tmp_path: Path) -> None:
+    """Verify snapshot_time guarantees deterministic naming and idempotent overwrite."""
+    from datetime import datetime, timezone
+
+    client = PrimApiClient(api_key="test_api_key")
+    sample_payload: dict[str, Any] = {"status": "ok", "run": 1}
+    fixed_time = datetime(2026, 11, 10, 14, 15, 0, tzinfo=timezone.utc)
+    line_ref = "STIF:Line::C01742:"
+
+    path_1 = client.save_to_bronze(
+        data=sample_payload,
+        line_ref=line_ref,
+        base_dir=tmp_path,
+        snapshot_time=fixed_time,
+    )
+    assert path_1.name == "run_C01742_141500.json"
+    assert "2026/11/10" in str(path_1)
+
+    # Re-running with updated payload should overwrite the exact same file
+    updated_payload: dict[str, Any] = {"status": "ok", "run": 2}
+    path_2 = client.save_to_bronze(
+        data=updated_payload,
+        line_ref=line_ref,
+        base_dir=tmp_path,
+        snapshot_time=fixed_time,
+    )
+    assert path_1 == path_2
+    with open(path_2, encoding="utf-8") as f:
+        assert json.load(f)["run"] == 2

@@ -12,6 +12,6 @@ rail_track:
           data/gold/rail_track.duckdb
         {%- endif -%}
       schema: main
-      threads: 4
+      threads: 1
       extensions:
         - parquet

@@ -233,10 +233,16 @@ with st.sidebar:
         date_options.append("Tout l'historique")
         date_map["Tout l'historique"] = None
 
+    default_date_idx = 0
+    for idx, opt in enumerate(date_options):
+        if opt.startswith("Aujourd'hui"):
+            default_date_idx = idx
+            break
+
     selected_date = st.selectbox(
         "Date d'observation :",
         options=date_options,
-        index=0,
+        index=default_date_idx,
     )
 
     date_filter_sql = ""
@@ -245,15 +251,21 @@ with st.sidebar:
 
     selected_line = st.selectbox(
         "Ligne de RER :",
-        options=["Toutes les lignes (RER A & B)", "RER A", "RER B"],
+        options=[
+            "Toutes les lignes (RER A, B, C, D, E)",
+            "RER A",
+            "RER B",
+            "RER C",
+            "RER D",
+            "RER E",
+        ],
         index=0,
     )
 
     line_filter_sql = ""
-    if selected_line == "RER A":
-        line_filter_sql = "AND t.line_name = 'A'"
-    elif selected_line == "RER B":
-        line_filter_sql = "AND t.line_name = 'B'"
+    if selected_line.startswith("RER "):
+        line_code = selected_line.replace("RER ", "").strip()
+        line_filter_sql = f"AND t.line_name = '{line_code}'"
 
     st.markdown("---")
     st.markdown("### ℹ️ Méthodologie")

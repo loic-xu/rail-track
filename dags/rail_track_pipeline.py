@@ -1,7 +1,7 @@
 """RailTrack Pipeline — End-to-End Orchestration DAG.
 
 Orchestrates the complete data journey from PRIM API to Gold marts:
-1. task_ingest_bronze   : Fetch real-time SIRI snapshots for RER A & B into Bronze.
+1. task_ingest_bronze   : Fetch real-time SIRI snapshots (RER A-E) into Bronze.
 2. task_quality_gate    : Validate contract compliance of new Bronze payloads.
 3. task_transform_silver : Flatten, compute delays & partition into Silver Parquet.
 4. task_dbt_run_gold    : Seed referentials and materialize dimensional Gold marts.
@@ -27,8 +27,11 @@ from rail_track.utils.logger import get_logger
 logger = get_logger("rail_track.airflow_dag")
 
 TARGET_LINES = [
-    "STIF:Line::C01742:",
-    "STIF:Line::C01743:",
+    "STIF:Line::C01742:",  # RER A
+    "STIF:Line::C01743:",  # RER B
+    "STIF:Line::C01727:",  # RER C
+    "STIF:Line::C01728:",  # RER D
+    "STIF:Line::C01729:",  # RER E
 ]
 
 DEFAULT_ARGS = {
@@ -46,6 +49,11 @@ def ingest_bronze(**context: Any) -> list[str]:
     """Ingest real-time SIRI line data from PRIM API into Bronze layer."""
     client = PrimApiClient()
     saved_files: list[str] = []
+    logical_date = (
+        context.get("data_interval_start")
+        or context.get("logical_date")
+        or datetime.now(timezone.utc)
+    )
 
     for line_ref in TARGET_LINES:
         logger.info(f"Fetching raw transit payload for line: {line_ref}")
@@ -54,6 +62,7 @@ def ingest_bronze(**context: Any) -> list[str]:
             data=payload,
             line_ref=line_ref,
             base_dir="/opt/airflow/data/bronze",
+            snapshot_time=logical_date,
         )
         logger.info(f"Saved Bronze payload to {saved_path}")
         saved_files.append(str(saved_path))
@@ -133,10 +142,18 @@ def transform_silver(**context: Any) -> list[str]:
     transformer = SilverTransformer()
     silver_dir = "/opt/airflow/data/silver"
 
+    logical_date = (
+        context.get("data_interval_start")
+        or context.get("logical_date")
+        or datetime.now(timezone.utc)
+    )
+    target_filename = f"train_stops_{logical_date:%Y%m%d_%H%M%S}.parquet"
+
     logger.info(f"Transforming incremental Bronze files: {bronze_files}")
     saved_paths = transformer.transform(
         bronze_path_pattern=bronze_files,
         silver_dir=silver_dir,
+        filename=target_filename,
     )
 
     result_files = [str(p) for p in saved_paths]

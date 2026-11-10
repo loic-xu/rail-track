@@ -1,7 +1,7 @@
 """Synchronize official IDFM station referential data into dbt seeds.
 
 Fetches the latest official station master data from the Île-de-France Mobilités
-Open Data API, extracts stations for RER A and RER B, formats technical identifiers
+Open Data API, extracts stations for RER A, B, C, D and E, formats technical identifiers
 to match SIRI NeTEx standard (``STIF:StopArea:SP:XXXXX:``), deduplicates multimodal
 hubs, and writes ``dbt/seeds/dim_stations_rer.csv``.
 """
@@ -43,7 +43,7 @@ def fetch_stations_referential(
         params: dict[str, Any] = {
             "limit": limit,
             "offset": offset,
-            "where": "res_com IN ('RER A', 'RER B')",
+            "where": "res_com IN ('RER A', 'RER B', 'RER C', 'RER D', 'RER E')",
         }
         try:
             response = httpx.get(API_URL, params=params, timeout=timeout_s)
