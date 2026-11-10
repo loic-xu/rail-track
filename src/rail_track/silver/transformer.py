@@ -505,3 +505,92 @@ class SilverTransformer:
             f"Removed {removed_count} obsolete delta files."
         )
         return final_path
+
+    def compact_day(
+        self,
+        silver_dir: Path | str,
+        year: int,
+        month: int,
+        day: int,
+        target_filename: str | None = None,
+    ) -> Path | None:
+        """Compact Silver delta Parquet files of a given day into one file.
+
+        Consolidates 15-minute micro-batch Parquet files of a specific date
+        into an atomic, ZSTD-compressed, consolidated daily file.
+        Mitigates the Small Files Problem while maintaining daily granularity.
+
+        Args:
+            silver_dir: Base directory for the Silver layer (e.g. ``data/silver``).
+            year: Target partition year (e.g. 2026).
+            month: Target partition month (e.g. 11).
+            day: Target partition day (e.g. 10).
+            target_filename: Optional custom filename. Defaults to
+                ``train_stops_{year}{month:02d}{day:02d}.parquet``.
+
+        Returns:
+            Path to the newly compacted daily Parquet file, or existing path if already
+            compacted, or None if no files exist for that day.
+        """
+        partition_dir = Path(silver_dir) / f"year={year}" / f"month={month:02d}"
+        if not partition_dir.exists():
+            logger.warning(f"Partition directory does not exist: {partition_dir}")
+            return None
+
+        day_prefix = f"train_stops_{year}{month:02d}{day:02d}_"
+        final_name = (
+            target_filename or f"train_stops_{year}{month:02d}{day:02d}.parquet"
+        )
+        final_path = partition_dir / final_name
+
+        parquet_files = sorted(partition_dir.glob(f"{day_prefix}*.parquet"))
+        if not parquet_files:
+            if final_path.exists():
+                logger.info(f"Day {year}-{month:02d}-{day:02d} is already compacted")
+                return final_path
+            logger.warning(
+                f"No delta Parquet files found in {partition_dir} for day {day:02d}."
+            )
+            return None
+
+        if len(parquet_files) == 1 and parquet_files[0] == final_path:
+            logger.info(
+                f"Day {year}-{month:02d}-{day:02d} is already compacted: {final_path}"
+            )
+            return final_path
+
+        files_to_read = list(parquet_files)
+        if final_path.exists() and final_path not in files_to_read:
+            files_to_read.append(final_path)
+
+        logger.info(
+            f"Compacting {len(files_to_read)} Parquet files for day "
+            f"{year}-{month:02d}-{day:02d} into {final_path}"
+        )
+
+        tmp_path = partition_dir / f"{final_name}.tmp"
+        file_literals = (
+            "[" + ", ".join(f"'{p.as_posix()}'" for p in files_to_read) + "]"
+        )
+
+        compact_query = f"""
+        COPY (
+            SELECT *
+            FROM read_parquet({file_literals})
+        ) TO '{tmp_path.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD);
+        """
+        self.conn.execute(compact_query)
+        tmp_path.replace(final_path)
+
+        removed_count = 0
+        for f in files_to_read:
+            if f != final_path and f.exists():
+                f.unlink()
+                removed_count += 1
+
+        logger.info(
+            f"Daily compaction completed: consolidated {len(files_to_read)} files "
+            f"into {final_path} ({final_path.stat().st_size} bytes). "
+            f"Removed {removed_count} obsolete delta files."
+        )
+        return final_path

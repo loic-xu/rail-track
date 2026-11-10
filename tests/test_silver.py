@@ -6,7 +6,7 @@ preventing silent schema drift between the two code paths.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -456,6 +456,82 @@ def test_compact_month_missing_or_empty_partition(tmp_path: Path) -> None:
     assert transformer.compact_month(tmp_path / "silver", year=2026, month=1) is None
 
 
+def test_compact_day_consolidates_files(tmp_path: Path) -> None:
+    """Daily compaction must consolidate only target day deltas into one file."""
+    transformer = SilverTransformer()
+    part_dir = tmp_path / "silver" / "year=2026" / "month=11"
+    part_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create 2 mock files for day 10 and 1 mock file for day 11
+    now = datetime.now(timezone.utc)
+    for i in (1, 2):
+        df = pl.DataFrame(
+            {
+                "journey_id": [f"TRAIN_D10_{i}"],
+                "recorded_at": [now],
+                "line_name": ["A"],
+                "arrival_delay_min": [1.0],
+            }
+        )
+        df.write_parquet(part_dir / f"train_stops_20261110_10{i}000.parquet")
+
+    df_d11 = pl.DataFrame(
+        {
+            "journey_id": ["TRAIN_D11_1"],
+            "recorded_at": [now],
+            "line_name": ["B"],
+            "arrival_delay_min": [0.0],
+        }
+    )
+    df_d11.write_parquet(part_dir / "train_stops_20261111_080000.parquet")
+
+    assert len(list(part_dir.glob("*.parquet"))) == 3
+
+    # Compact only day 10
+    compacted = transformer.compact_day(
+        tmp_path / "silver", year=2026, month=11, day=10
+    )
+
+    assert compacted is not None
+    assert compacted.exists()
+    assert compacted.name == "train_stops_20261110.parquet"
+
+    # Day 11 file must remain untouched alongside the new day 10 compacted file
+    remaining_files = sorted(p.name for p in part_dir.glob("*.parquet"))
+    assert remaining_files == [
+        "train_stops_20261110.parquet",
+        "train_stops_20261111_080000.parquet",
+    ]
+
+    # Verify day 10 content
+    compacted_df = pl.read_parquet(compacted)
+    assert compacted_df.height == 2
+    assert set(compacted_df["journey_id"].to_list()) == {
+        "TRAIN_D10_1",
+        "TRAIN_D10_2",
+    }
+
+    # Idempotent re-run returns same path
+    recompacted = transformer.compact_day(
+        tmp_path / "silver", year=2026, month=11, day=10
+    )
+    assert recompacted == compacted
+
+
+def test_compact_day_missing_or_empty_partition(tmp_path: Path) -> None:
+    """Non-existent day or partition returns None without errors."""
+    transformer = SilverTransformer()
+    assert (
+        transformer.compact_day(tmp_path / "silver", year=2026, month=12, day=1) is None
+    )
+
+    empty_dir = tmp_path / "silver" / "year=2026" / "month=11"
+    empty_dir.mkdir(parents=True, exist_ok=True)
+    assert (
+        transformer.compact_day(tmp_path / "silver", year=2026, month=11, day=5) is None
+    )
+
+
 def test_nocturnal_empty_payload_graceful_handling(tmp_path: Path) -> None:
     """Empty nocturnal SIRI payloads produce empty output without error."""
     empty_payload = {
@@ -485,3 +561,126 @@ def test_nocturnal_empty_payload_graceful_handling(tmp_path: Path) -> None:
     # Full transform pipeline executes cleanly without raising exceptions
     saved_files = transformer.transform(sample_file, silver_dir=tmp_path / "silver")
     assert saved_files == []
+
+
+def test_compaction_preserves_gold_invariance(tmp_path: Path) -> None:
+    """Verify Gold queries produce identical data before and after Silver compaction."""
+    import duckdb
+
+    transformer = SilverTransformer()
+    silver_dir = tmp_path / "silver"
+    part_dir = silver_dir / "year=2026" / "month=11"
+    part_dir.mkdir(parents=True, exist_ok=True)
+
+    base_time = datetime(2026, 11, 10, 8, 0, 0, tzinfo=timezone.utc)
+    batch_1 = pl.DataFrame(
+        {
+            "journey_id": ["TRAIN_A", "TRAIN_A", "TRAIN_B"],
+            "stop_point_ref": ["STOP_1", "STOP_2", "STOP_1"],
+            "recorded_at": [base_time, base_time, base_time],
+            "line_name": ["A", "A", "B"],
+            "aimed_arrival_time": [
+                base_time + timedelta(minutes=10),
+                base_time + timedelta(minutes=20),
+                base_time + timedelta(minutes=15),
+            ],
+            "expected_arrival_time": [
+                base_time + timedelta(minutes=12),
+                base_time + timedelta(minutes=22),
+                base_time + timedelta(minutes=15),
+            ],
+            "aimed_departure_time": [
+                base_time + timedelta(minutes=11),
+                base_time + timedelta(minutes=21),
+                base_time + timedelta(minutes=16),
+            ],
+            "expected_departure_time": [
+                base_time + timedelta(minutes=13),
+                base_time + timedelta(minutes=23),
+                base_time + timedelta(minutes=16),
+            ],
+            "arrival_delay_min": [2.0, 2.0, 0.0],
+            "is_late_5min": [False, False, False],
+        }
+    )
+    batch_1.write_parquet(part_dir / "train_stops_20261110_080000.parquet")
+
+    later_time = base_time + timedelta(minutes=15)
+    batch_2 = pl.DataFrame(
+        {
+            "journey_id": ["TRAIN_A", "TRAIN_C"],
+            "stop_point_ref": ["STOP_2", "STOP_3"],
+            "recorded_at": [later_time, later_time],
+            "line_name": ["A", "A"],
+            "aimed_arrival_time": [
+                base_time + timedelta(minutes=20),
+                base_time + timedelta(minutes=30),
+            ],
+            "expected_arrival_time": [
+                base_time + timedelta(minutes=28),
+                base_time + timedelta(minutes=30),
+            ],
+            "aimed_departure_time": [
+                base_time + timedelta(minutes=21),
+                base_time + timedelta(minutes=31),
+            ],
+            "expected_departure_time": [
+                base_time + timedelta(minutes=29),
+                base_time + timedelta(minutes=31),
+            ],
+            "arrival_delay_min": [8.0, 0.0],
+            "is_late_5min": [True, False],
+        }
+    )
+    batch_2.write_parquet(part_dir / "train_stops_20261110_081500.parquet")
+
+    conn = duckdb.connect(":memory:")
+    gold_staging_sql = f"""
+    WITH raw_silver AS (
+        SELECT * FROM read_parquet('{(silver_dir / "**/*.parquet").as_posix()}')
+    ),
+    deduplicated_stops AS (
+        SELECT * FROM raw_silver
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY journey_id, stop_point_ref
+            ORDER BY recorded_at DESC
+        ) = 1
+    ),
+    sequenced_stops AS (
+        SELECT *,
+            ROW_NUMBER() OVER (
+                PARTITION BY journey_id
+                ORDER BY COALESCE(
+                    aimed_arrival_time,
+                    aimed_departure_time,
+                    expected_arrival_time,
+                    expected_departure_time
+                )
+            ) AS rebuilt_stop_sequence
+        FROM deduplicated_stops
+    )
+    SELECT
+        md5(concat_ws('||', journey_id, stop_point_ref)) AS punctuality_key,
+        journey_id,
+        stop_point_ref,
+        rebuilt_stop_sequence,
+        arrival_delay_min,
+        is_late_5min,
+        recorded_at
+    FROM sequenced_stops
+    ORDER BY punctuality_key;
+    """
+
+    df_gold_before = conn.sql(gold_staging_sql).pl()
+
+    compacted_file = transformer.compact_day(silver_dir, year=2026, month=11, day=10)
+    assert compacted_file is not None
+    assert compacted_file.name == "train_stops_20261110.parquet"
+
+    remaining_files = list(part_dir.glob("*.parquet"))
+    assert remaining_files == [compacted_file]
+
+    df_gold_after = conn.sql(gold_staging_sql).pl()
+
+    assert df_gold_before.equals(df_gold_after)
+    assert df_gold_after.height == 4
