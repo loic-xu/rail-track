@@ -356,6 +356,25 @@ rail-track/
 
 ---
 
+## 🔮 Future Roadmap & Architectural Evolutions
+
+Key engineering enhancements identified for scaling, production hardening, and enterprise readiness:
+
+1. **Self-Healing Compaction (Multi-Day Auto-Backfill):**
+   - Evolve `rail_track_daily_compaction` from a single-day target to dynamic auto-discovery across `data/silver/`. Automatically scans, groups, and consolidates all historical uncompacted delta files (`date < today`) sequentially without requiring manual operator intervention after infrastructure downtime.
+2. **Decoupled Ingestion vs. Transformation DAGs (Airflow Datasets):**
+   - Split the monolithic ELT pipeline into two isolated DAGs (`rail_track_ingest_bronze` ➔ `rail_track_processing_marts`) synchronized via Airflow Datasets (*Data-Aware Scheduling*). Completely eliminates the human misclick risk on `Clear`, guaranteeing zero blast radius and absolute immutability for the raw Bronze audit trail.
+3. **dbt Incremental Materialization (`is_incremental()`):**
+   - Transition `fact_train_punctuality` from full rebuild ($820\text{ ms}$) to daily rolling-window incremental merges with surrogate key deduplication once historical volume exceeds 6 months (> 4.5M rows).
+4. **24/7 Cloud Pipeline Deployment:**
+   - Migrate containerized Airflow stack from local environment to a lightweight cloud VPS (e.g. Hetzner / DigitalOcean / AWS EC2) or managed orchestration (Astronomer / GCP Cloud Composer) for uninterrupted round-the-clock streaming.
+5. **Public Production Hosting for Streamlit Dashboard:**
+   - Deploy interactive analytics UI publicly (e.g. Streamlit Community Cloud or Cloud Run container) with real-time DuckDB read-only query access for commuters and public transit stakeholders.
+6. **Proactive Observability & Webhook Alerting:**
+   - Integrate Airflow failure callbacks (`on_failure_callback`) dispatching structured Slack / Discord / Teams webhooks upon upstream PRIM API degradation or Pydantic contract violations.
+
+---
+
 ## 📜 License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
