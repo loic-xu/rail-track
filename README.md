@@ -1,4 +1,4 @@
-d# 🚆 RailTrack — Real-Time Transit Lakehouse & Analytics Platform
+# 🚆 RailTrack — Real-Time Transit Lakehouse & Analytics Platform
 
 [![CI](https://github.com/loic-xu/rail-track/actions/workflows/ci.yml/badge.svg)](https://github.com/loic-xu/rail-track/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
@@ -48,12 +48,12 @@ flowchart TD
     subgraph SILVER ["2. Silver Zone (Conformed & Flattened)"]
         Bronze -->|"DuckDB Streaming Engine\n(5-level unnesting, UTC timestamps)"| Transformer["SilverTransformer\n(DuckDB + Polars)"]
         Contract["Data Contract Guard\nPydantic (Control Plane)"] -.->|"Boundary Schema Validation\n(<2ms, Zero Drift)"| Transformer
-        Transformer -->|"Calculated delays (min)\nHot deltas (~45 KB)"| ParquetHot["Silver Parquet (Hot)\nyear=YYYY/month=MM/"]
-        ParquetHot -->|"Monthly Nocturnal Compaction\n(1st of month @ 03:00)"| ParquetCold["Silver Parquet (Cold)\ntrain_stops_YYYYMM.parquet"]
+        Transformer -->|"Calculated delays (min)\n15-min micro-batches (~45 KB)"| ParquetDeltas["Silver Micro-Batches (Hot)\ntrain_stops_YYYYMMDD_HHMMSS.parquet"]
+        ParquetDeltas -->|"Daily Nocturnal Compaction\n(Every night @ 02:00 UTC)"| ParquetDaily["Silver Daily Compacted\ntrain_stops_YYYYMMDD.parquet"]
     end
 
     subgraph GOLD ["3. Gold Zone (Dimensional Kimball Modeling)"]
-        ParquetHot & ParquetCold -->|"dbt-duckdb\nStaging Reconciliation"| Staging["stg_train_stops (View)\n(Physical Grain Deduplication)"]
+        ParquetDeltas & ParquetDaily -->|"dbt-duckdb\nStaging Reconciliation"| Staging["stg_train_stops (View)\n(Physical Grain Deduplication)"]
         Staging --> DimStation["dim_station (Table)\n(Stations, GPS, Zones)"]
         Staging --> DimTrain["dim_train (Table)\n(Missions, Rolling Stock)"]
         Staging --> DimDate["dim_date (Table)\n(ISO Calendar, Peak Periods)"]
@@ -208,7 +208,8 @@ docker compose up -d
 # Open the Airflow Web UI
 # URL: http://localhost:8080 (Login: airflow / airflow)
 ```
-The DAG `rail_track_pipeline` will automatically trigger every 15 minutes to ingest, clean, materialize, and test live transit data.
+The production DAG `rail_track_pipeline` will automatically trigger every 15 minutes to ingest, clean, materialize, and test live transit data.
+The companion maintenance DAG `rail_track_daily_compaction` runs automatically every night at 02:00 UTC to consolidate micro-batches into daily Parquet files without write amplification.
 
 ### 6. Launching the Citizen Analytics Dashboard (Streamlit)
 ```bash
@@ -232,14 +233,14 @@ Open [http://localhost:8501](http://localhost:8501) to interactively explore net
 </details>
 
 <details>
-<summary><b>2. Solving the "Small Files Problem" via Hot/Cold Storage Compaction</b></summary>
+<summary><b>2. Solving the "Small Files Problem" via Daily Nocturnal Compaction</b></summary>
 <br>
 
-* **The Problem:** Ingesting RER A & B every 15 minutes generates ~2,520 micro-files per month (30,000 per year). Leaving micro-files causes severe filesystem I/O tax, metadata degradation, and poor ZSTD dictionary compression. Daily compaction would trigger *Write Amplification* by rewriting the entire month every single night.
+* **The Problem:** Ingesting RER A & B every 15 minutes generates ~84 micro-files per day (~2,520 per month). In a local or cloud Lakehouse, leaving micro-files causes severe filesystem I/O tax, metadata degradation, and file descriptor exhaustion during parallel query execution. Rewriting the entire month every night would cause massive *Write Amplification*.
 * **The Architecture Solution:**
-  * **Hot Storage (Current Month):** Real-time runs append lightweight, lock-free delta files (`train_stops_{timestamp}.parquet`, ~45 KB).
-  * **Cold Compaction DAG (`rail_track_monthly_compaction`):** On the 1st of every month at 03:00 (during rail service interruption), Airflow triggers a vectorized DuckDB compaction job that consolidates the previous month's ~2,520 deltas into a single 30 MB Parquet file and cleans up the micro-files.
-  * **Result:** Zero intra-month write amplification, only 12 optimized Parquet files per year, and annual analytical scans executing in $<50\text{ ms}$.
+  * **Hot Ingestion (Daytime):** Real-time runs append lightweight, lock-free delta files (`train_stops_{YYYYMMDD_HHMMSS}.parquet`, ~45 KB) to preserve low-latency freshness (<15 min).
+  * **Daily Compaction DAG (`rail_track_daily_compaction`):** Every night at 02:00 UTC (during the RER night break), Airflow triggers a vectorized DuckDB compaction job (`compact_day()`). It consolidates the ~84 micro-batches of the concluded day into a single daily Parquet file (`train_stops_YYYYMMDD.parquet`, ~3.5 MB) compressed with ZSTD, and atomistically deletes the deltas.
+  * **Zero Write Amplification & Gold Invariance:** Unlike full-month rewrites, each day is compacted strictly once (84-to-1 reduction). Dedicated unit tests (`test_compaction_preserves_gold_invariance`) formally verify that the Gold layer dimensional marts and metrics remain 100% invariant before and after compaction.
 </details>
 
 <details>
@@ -264,8 +265,32 @@ Open [http://localhost:8501](http://localhost:8501) to interactively explore net
 <summary><b>4. Dual Quality Gate: CI vs. Production Orchestration</b></summary>
 <br>
 
-* **In CI (GitHub Actions):** Tests **Code Integrity**. Runs Ruff, strict Mypy, 26 Pytest tests, and executes `dbt compile` in RAM using an in-memory DuckDB database (`DBT_DUCKDB_PATH=":memory:"`) without requiring production data volumes.
+* **In CI (GitHub Actions):** Tests **Code Integrity**. Runs Ruff, strict Mypy, 31 Pytest tests, and executes `dbt compile` in RAM using an in-memory DuckDB database (`DBT_DUCKDB_PATH=":memory:"`) without requiring production data volumes.
 * **In Production (Apache Airflow):** Tests **Data Integrity**. After each 15-minute Gold materialization (`dbt run`), `task_dbt_test_gold` executes all **28 dbt data quality assertion tests**. Any violation (null primary key, broken foreign key) halts downstream processing and raises an alert.
+</details>
+
+<details>
+<summary><b>5. High-Concurrency DuckDB & dbt Tuning (The "Too Many Open Files" Post-Mortem)</b></summary>
+<br>
+
+* **The Incident:** As the Silver layer crossed 200 Parquet micro-partitions, the production Airflow task `task_dbt_run_gold` failed with:
+  `IO Error: Cannot open file ".../train_stops_*.parquet": Too many open files`.
+* **Root Cause Analysis:**
+  * `stg_train_stops` is a dbt view executing `read_parquet(...)` across all partitions with an analytical window function (`QUALIFY ROW_NUMBER()`).
+  * dbt was configured with `threads: 4`, executing the 4 mart models concurrently. Each thread opened all 200+ Parquet files simultaneously ($4 \times 207 = 828$ file descriptors), exceeding the default container Linux limit (`ulimit -n = 1024`).
+* **The Architecture Solution:**
+  * **dbt Mono-Threading (`threads: 1` in `dbt/profiles.yml`):** DuckDB is an in-process, vector-parallelized C++ database engine. Running multi-threaded dbt against DuckDB creates file lock contention and multiplies open handles needlessly. In mono-thread dbt, DuckDB uses its own internal worker threads to process each model at maximum CPU efficiency. Gold rebuild time dropped to **0.82 seconds** with 0 errors.
+  * **Container Hardening (`ulimits.nofile: 65536` in `docker-compose.yml`):** Raised open file descriptor caps in Docker to safeguard production against long-term data volume scaling.
+</details>
+
+<details>
+<summary><b>6. Physical Storage Idempotence (The datetime.now() Anti-Pattern)</b></summary>
+<br>
+
+* **The Problem:** In an automated pipeline, deriving filenames from system clock (`datetime.now()`) is a critical anti-pattern. If an Airflow task is retried after a 3-minute network glitch or manually cleared via the UI, a new timestamped file (e.g. `105018.parquet` and `105019.parquet`) is generated alongside the original, creating physical duplicates on disk and corrupting downstream staging glob reads.
+* **The Architecture Solution:**
+  * Bronze dumps (`run_{line}_{data_interval_end:%H%M%S}.json`) and Silver partitions (`train_stops_{data_interval_end:%Y%m%d_%H%M%S}.parquet`) are bound deterministically to Airflow's execution context (`data_interval_end`).
+  * Replaying or retrying any execution interval cleanly overwrites the exact target file without orphan records, guaranteeing 100% physical and logical idempotence.
 </details>
 
 ---
@@ -279,10 +304,11 @@ rail-track/
 │       └── ci.yml                     # Automated CI pipeline (lint, typecheck, pytest, dbt compile)
 ├── dags/
 │   ├── rail_track_pipeline.py         # 15-minute ELT DAG (Bronze ➔ Silver ➔ Gold ➔ dbt test)
-│   └── rail_track_monthly_compaction.py # Nocturnal 1st-of-month cold compaction DAG
+│   ├── rail_track_daily_compaction.py # Nocturnal daily Silver compaction DAG (02:00 UTC)
+│   └── rail_track_monthly_compaction.py # Monthly cold compaction DAG
 ├── dbt/
 │   ├── dbt_project.yml                # dbt configuration with DuckDB adapter
-│   ├── profiles.yml                   # Dynamic path profiles (supports in-memory CI)
+│   ├── profiles.yml                   # Dynamic path profiles (threads: 1, supports in-memory CI)
 │   ├── seeds/
 │   │   └── dim_stations_rer.csv       # OpenData IDFM RER stations referential (GPS, lines)
 │   └── models/
@@ -300,14 +326,14 @@ rail-track/
 │       │   ├── client.py              # Resilient HTTP client (Keep-Alive, Tenacity backoff)
 │       │   └── models.py              # Strict Pydantic contracts for Control Plane
 │       ├── silver/
-│       │   └── transformer.py         # DuckDB streaming JSON unnesting & delay computation
+│       │   └── transformer.py         # DuckDB streaming JSON unnesting, delay & compaction logic
 │       └── utils/
 │           └── logger.py              # Structured logging
 ├── tests/
 │   ├── test_client.py                 # Mocked HTTP ingestion & retry tests
 │   ├── test_models.py                 # Pydantic schema validation & edge case tests
-│   └── test_silver.py                 # Vectorized DuckDB JSON unnesting & delay tests
-├── docker-compose.yml                 # Production Airflow 2.10 stack + DuckDB volume mount
+│   └── test_silver.py                 # DuckDB unnesting, delays, daily compaction & Gold invariance
+├── docker-compose.yml                 # Production Airflow stack + DuckDB volume mount & ulimits
 ├── Dockerfile                         # Custom Airflow image with dbt-duckdb and dependencies
 ├── pyproject.toml                     # Modern uv packaging configuration
 ├── .env.example                       # Documented environment variables template
@@ -322,9 +348,10 @@ rail-track/
 | :--- | :--- | :--- |
 | **Ingestion Validation** | Pydantic Schema Guard | $< 2\text{ ms}$ per sample |
 | **Silver Unnesting** | DuckDB JSON Vectorized Unnesting | $150\text{ ms}$ per $10\text{ MB}$ raw JSON |
-| **Gold Materialization** | dbt Star Schema Full Refresh | $400\text{ ms}$ for $15,000$ fact rows |
-| **dbt Test Suite** | 28 automated assertions | $600\text{ ms}$ total execution |
-| **Pytest Suite** | 26 unit & integration tests | $< 0.6\text{ s}$ execution |
+| **Daily Compaction** | 56 micro-batch deltas consolidated into 1 daily file | $< 100\text{ ms}$ |
+| **Gold Materialization** | dbt Star Schema Full Refresh (threads: 1) | $820\text{ ms}$ for 4 models + fact table |
+| **dbt Test Suite** | 28 automated assertions | $700\text{ ms}$ total execution |
+| **Pytest Suite** | 31 unit, integration & gold invariance tests | $< 0.8\text{ s}$ execution |
 | **Cold Storage Query** | Full year columnar scan | $< 50\text{ ms}$ |
 
 ---

@@ -50,7 +50,7 @@ def ingest_bronze(**context: Any) -> list[str]:
     client = PrimApiClient()
     saved_files: list[str] = []
     logical_date = (
-        context.get("data_interval_start")
+        context.get("data_interval_end")
         or context.get("logical_date")
         or datetime.now(timezone.utc)
     )
@@ -143,7 +143,7 @@ def transform_silver(**context: Any) -> list[str]:
     silver_dir = "/opt/airflow/data/silver"
 
     logical_date = (
-        context.get("data_interval_start")
+        context.get("data_interval_end")
         or context.get("logical_date")
         or datetime.now(timezone.utc)
     )
