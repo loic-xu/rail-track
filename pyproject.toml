@@ -1,7 +1,7 @@
 [project]
 name = "rail-track"
 version = "0.1.0"
-description = "Add your description here"
+description = "Real-time transit lakehouse tracking punctuality on Paris RER A & B with DuckDB, dbt, and Airflow"
 readme = "README.md"
 authors = [
     { name = "loic-xu", email = "loic.xu@icloud.com" }
