@@ -261,37 +261,7 @@ Open [http://localhost:8501](http://localhost:8501) to interactively explore net
   * **Impact:** 100% data recovery (all 14,879 real stops preserved), 0 duplicates, and pristine 1..N station sequences.
 </details>
 
-<details>
-<summary><b>4. Dual Quality Gate: CI vs. Production Orchestration</b></summary>
-<br>
 
-* **In CI (GitHub Actions):** Tests **Code Integrity**. Runs Ruff, strict Mypy, 31 Pytest tests, and executes `dbt compile` in RAM using an in-memory DuckDB database (`DBT_DUCKDB_PATH=":memory:"`) without requiring production data volumes.
-* **In Production (Apache Airflow):** Tests **Data Integrity**. After each 15-minute Gold materialization (`dbt run`), `task_dbt_test_gold` executes all **28 dbt data quality assertion tests**. Any violation (null primary key, broken foreign key) halts downstream processing and raises an alert.
-</details>
-
-<details>
-<summary><b>5. High-Concurrency DuckDB & dbt Tuning (The "Too Many Open Files" Post-Mortem)</b></summary>
-<br>
-
-* **The Incident:** As the Silver layer crossed 200 Parquet micro-partitions, the production Airflow task `task_dbt_run_gold` failed with:
-  `IO Error: Cannot open file ".../train_stops_*.parquet": Too many open files`.
-* **Root Cause Analysis:**
-  * `stg_train_stops` is a dbt view executing `read_parquet(...)` across all partitions with an analytical window function (`QUALIFY ROW_NUMBER()`).
-  * dbt was configured with `threads: 4`, executing the 4 mart models concurrently. Each thread opened all 200+ Parquet files simultaneously ($4 \times 207 = 828$ file descriptors), exceeding the default container Linux limit (`ulimit -n = 1024`).
-* **The Architecture Solution:**
-  * **dbt Mono-Threading (`threads: 1` in `dbt/profiles.yml`):** DuckDB is an in-process, vector-parallelized C++ database engine. Running multi-threaded dbt against DuckDB creates file lock contention and multiplies open handles needlessly. In mono-thread dbt, DuckDB uses its own internal worker threads to process each model at maximum CPU efficiency. Gold rebuild time dropped to **0.82 seconds** with 0 errors.
-  * **Container Hardening (`ulimits.nofile: 65536` in `docker-compose.yml`):** Raised open file descriptor caps in Docker to safeguard production against long-term data volume scaling.
-</details>
-
-<details>
-<summary><b>6. Physical Storage Idempotence (The datetime.now() Anti-Pattern)</b></summary>
-<br>
-
-* **The Problem:** In an automated pipeline, deriving filenames from system clock (`datetime.now()`) is a critical anti-pattern. If an Airflow task is retried after a 3-minute network glitch or manually cleared via the UI, a new timestamped file (e.g. `105018.parquet` and `105019.parquet`) is generated alongside the original, creating physical duplicates on disk and corrupting downstream staging glob reads.
-* **The Architecture Solution:**
-  * Bronze dumps (`run_{line}_{data_interval_end:%H%M%S}.json`) and Silver partitions (`train_stops_{data_interval_end:%Y%m%d_%H%M%S}.parquet`) are bound deterministically to Airflow's execution context (`data_interval_end`).
-  * Replaying or retrying any execution interval cleanly overwrites the exact target file without orphan records, guaranteeing 100% physical and logical idempotence.
-</details>
 
 ---
 
