@@ -10,7 +10,7 @@
 [![Checked with mypy](https://img.shields.io/badge/mypy-strict-blue.svg)](http://mypy-lang.org/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
-> **An end-to-end data platform tracking and modeling real-time transit punctuality on Paris commuter rail (RER A & RER B — 2.5M daily passengers) using DuckDB, dbt, and Apache Airflow.**
+> **An end-to-end data platform tracking and modeling real-time transit punctuality across all five Paris RER lines (A, B, C, D & E — 3.4M daily passengers) using DuckDB, dbt, and Apache Airflow.**
 
 <p align="center">
   <img src="docs/dashboard_preview.png" alt="RailTracker — The Citizen Transit Punctuality Dashboard" width="100%">
@@ -20,7 +20,7 @@
 
 ## 📖 Executive Summary & Business Context
 
-**RER A and RER B** are among the most heavily trafficked commuter rail corridors in Europe, moving more than **2.5 million passengers every day**. While regional authorities (Île-de-France Mobilités - IDFM) and operators (SNCF, RATP) publish aggregated monthly reliability reports, commuters and transit planners lack transparent, stop-by-stop metrics on:
+**The five Paris RER lines (A, B, C, D & E)** are among the most heavily trafficked commuter rail corridors in Europe, moving more than **3.4 million passengers every day**. While regional authorities (Île-de-France Mobilités - IDFM) and operators (SNCF, RATP) publish aggregated monthly reliability reports, commuters and transit planners lack transparent, stop-by-stop metrics on:
 
 1. **Atomic Station Delays:** Calculating precise scheduled vs. expected deltas at every single platform stop.
 2. **Delay Cascading Dynamics ("Snowball Effect"):** Pinpointing the bottleneck stations where micro-delays accumulate and amplify along the corridor.
@@ -179,11 +179,11 @@ DBT_DUCKDB_PATH=":memory:" uv run dbt compile --profiles-dir dbt --project-dir d
 ### 4. Running the Pipeline Locally (CLI)
 Test the entire ELT workflow manually without launching Docker:
 ```bash
-# 1. Fetch live snapshot for RER A and RER B
-uv run python -c "
+# 1. Fetch live snapshot for all RER lines
+uv run python -c \"
 from rail_track.ingestion.client import PrimApiClient
 client = PrimApiClient()
-for line in ['STIF:Line::C01742:', 'STIF:Line::C01743:']:
+for line in ['STIF:Line::C01742:', 'STIF:Line::C01743:', 'STIF:Line::C01727:', 'STIF:Line::C01728:', 'STIF:Line::C01729:']:
     payload = client.fetch_line_data(line)
     client.save_to_bronze(payload, line)
 "
@@ -236,7 +236,7 @@ Open [http://localhost:8501](http://localhost:8501) to interactively explore net
 <summary><b>2. Solving the "Small Files Problem" via Daily Nocturnal Compaction</b></summary>
 <br>
 
-* **The Problem:** Ingesting RER A & B every 15 minutes generates ~84 micro-files per day (~2,520 per month). In a local or cloud Lakehouse, leaving micro-files causes severe filesystem I/O tax, metadata degradation, and file descriptor exhaustion during parallel query execution. Rewriting the entire month every night would cause massive *Write Amplification*.
+* **The Problem:** Ingesting all five RER lines every 15 minutes generates ~210 micro-files per day (~6,300 per month). In a local or cloud Lakehouse, leaving micro-files causes severe filesystem I/O tax, metadata degradation, and file descriptor exhaustion during parallel query execution. Rewriting the entire month every night would cause massive *Write Amplification*.
 * **The Architecture Solution:**
   * **Hot Ingestion (Daytime):** Real-time runs append lightweight, lock-free delta files (`train_stops_{YYYYMMDD_HHMMSS}.parquet`, ~45 KB) to preserve low-latency freshness (<15 min).
   * **Daily Compaction DAG (`rail_track_daily_compaction`):** Every night at 02:00 UTC (during the RER night break), Airflow triggers a vectorized DuckDB compaction job (`compact_day()`). It consolidates the ~84 micro-batches of the concluded day into a single daily Parquet file (`train_stops_YYYYMMDD.parquet`, ~3.5 MB) compressed with ZSTD, and atomistically deletes the deltas.
